@@ -166,6 +166,10 @@ public final class IcebergUtil
     public static final String METADATA_FILE_EXTENSION = ".metadata.json";
     private static final Pattern SIMPLE_NAME = Pattern.compile("[a-z][a-z0-9]*");
     static final String TRINO_QUERY_ID_NAME = "trino_query_id";
+    // File name pattern for a Trino Iceberg metadata file: <version>-<uuid>
+    private static final Pattern TRINO_ICEBERG_METADATA_FILE_PATTERN = Pattern.compile("^(\\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    // File name pattern for a Iceberg incomplete transaction metadata file: <uuid>.metadata.json
+    private static final Pattern ICEBERG_INCOMPLETE_TRANACTION_METADATA_FILE_PATTERN = Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.metadata\\.json$");
 
     private IcebergUtil() {}
 
@@ -705,13 +709,37 @@ public final class IcebergUtil
     public static OptionalInt parseVersion(String metadataLocation)
             throws TrinoException
     {
-        int versionStart = metadataLocation.lastIndexOf('/') + 1; // if '/' isn't found, this will be 0
-        int versionEnd = metadataLocation.indexOf('-', versionStart);
-        if (versionStart == 0 || versionEnd == -1) {
-            throw new TrinoException(ICEBERG_BAD_DATA, "Invalid metadata location: " + metadataLocation);
-        }
+        int fileNameStart = metadataLocation.lastIndexOf('/') + 1; // if '/' isn't found, this will be 0
+
         try {
-            return OptionalInt.of(parseInt(metadataLocation.substring(versionStart, versionEnd)));
+            if (fileNameStart == 0) {
+                throw new TrinoException(ICEBERG_BAD_DATA, "Invalid metadata location: " + metadataLocation);
+            }
+            // Iceberg standard metadata file:
+            else if (metadataLocation.charAt(fileNameStart) == 'v') {
+                // if the file name starts with 'v', metadata files are in standard Iceberg format:
+                // v<version>.metadata.json
+                // Example: v123.metadata.json
+                int firstDot = metadataLocation.indexOf('.', fileNameStart);
+                if (firstDot == -1) {
+                    throw new TrinoException(ICEBERG_BAD_DATA, "Invalid metadata location: " + metadataLocation);
+                }
+                return OptionalInt.of(parseInt(metadataLocation.substring(fileNameStart + 1, firstDot)));
+            }
+
+            String fileName = metadataLocation.substring(fileNameStart);
+            //  Trino Iceberg metadata file:
+            Matcher matchTrinoMetadataFile = TRINO_ICEBERG_METADATA_FILE_PATTERN.matcher(fileName);
+            if (matchTrinoMetadataFile.find()) {
+                log.warn("Incomplete transaction metadata file detected: %s", metadataLocation);
+                return OptionalInt.of(parseInt(matchTrinoMetadataFile.group(1)));
+            }
+            // Iceberg incomplete transaction metadata file.
+            else if (ICEBERG_INCOMPLETE_TRANACTION_METADATA_FILE_PATTERN.matcher(fileName).find()) {
+                return OptionalInt.empty();
+            }
+
+            throw new TrinoException(ICEBERG_BAD_DATA, "Invalid metadata location: " + metadataLocation);
         }
         catch (NumberFormatException e) {
             log.warn(e, "Unable to parse version from metadata location: %s", metadataLocation);
